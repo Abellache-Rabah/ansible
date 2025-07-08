@@ -1,0 +1,61 @@
+---
+- name: Update hosts
+  hosts: all
+  gather_facts: true
+  ignore_unreachable: true
+  become: true
+  tasks:
+    - name: Remove unreachable hosts
+      ansible.builtin.meta: clear_host_errors
+
+    - name: Update Debian
+      when: ansible_os_family == 'Debian'
+      block:
+        - name: Update APT cache
+          ansible.builtin.apt:
+            update_cache: true
+        - name: Upgrade Debian packages
+          ansible.builtin.apt:
+            name: "*"
+            state: latest
+            only_upgrade: true
+        - name: Clean APT cache
+          ansible.builtin.apt:
+            autoclean: true
+
+    - name: Update RedHat
+      when: ansible_os_family == 'RedHat'
+      block:
+        - name: Update RedHat packages
+          ansible.builtin.dnf:
+            name: "*"
+            state: latest
+            update_only: true
+        - name: Clean DNF cache
+          ansible.builtin.command: dnf clean all
+          register: my_output
+          changed_when: my_output.rc != 0
+
+    - name: Update Alpine
+      when: ansible_os_family == 'Alpine'
+      block:
+        - name: Update Alpine packages
+          community.general.apk:
+            upgrade: true
+        - name: Clean APK cache
+          ansible.builtin.command: apk cache clean
+          register: my_output
+          changed_when: my_output.rc != 0
+
+    - name: Update and upgrade packages for Homebrew
+      when: ansible_pkg_mgr == 'homebrew'
+      block:
+        - name: Update HomeBrew
+          community.general.homebrew:
+            update_homebrew: true
+            upgrade_all: true
+        - name: Cleanup HomeBrew
+          ansible.builtin.command: brew cleanup
+          register: my_output
+          changed_when: my_output.rc != 0
+
