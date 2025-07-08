@@ -1,1 +1,7 @@
 echo "hello"
+
+
+pwd
+
+
+whoami
