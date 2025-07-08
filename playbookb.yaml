@@ -1,0 +1,70 @@
+- name: playbookv3
+  hosts: all
+  become: true
+  tasks:
+    - name: installing nginx
+      ansible.builtin.package:
+        name: nginx
+        state: present
+    - name: installing php
+      ansible.builtin.package:
+        name: php-fpm
+        state: present
+    - name: creqting group www
+      ansible.builtin.group:
+        name: www
+        state: present
+    - name: creating user  www
+      ansible.builtin.user:
+        name: www
+        group: www
+    - name: creating the folder /www
+      ansible.builtin.file:
+        path: "/www"
+        state: directory
+        owner: www
+        group: www
+    - name: chmoding the file
+      ansible.builtin.file:
+        path: "/var/lib/nginx"
+        owner: www
+        group: www
+    - name: touching a php file
+      file:
+        path: "/www/index.php"
+        state: touch
+        owner: www
+        group: www
+    - name: simple php page
+      copy:
+        dest: /www/index.php
+        content: |
+            <?php
+            phpinfo();
+            ?>
+    - name: Copying the config file
+      ansible.builtin.copy:
+        src: ./nginx.conf
+        dest: /etc/nginx/
+    - name: updating php confing to use sockets
+      ansible.builtin.lineinfile:
+        path: /etc/php82/php-fpm.d/www.conf
+        regexp: '{{ item.regexp }}'
+        line: '{{ item.line }}'
+      with_items:
+        - { regexp: '^listen =', line: 'listen = /var/run/php-fpm83.sock'}
+        - { regexp: '^;listen.owner', line: 'listen.owner = www'}
+        - { regexp: '^;listen.group', line: 'listen.group = www'}
+        - { regexp: '^;listen.mode', line: 'listen.mode = 0660'}
+    - name: Start php
+      ansible.builtin.service:
+        name: php-fpm82
+        state: restarted
+        enabled: yes
+        use: rc-service
+    - name: reload nginx
+      ansible.builtin.service:
+        name: nginx
+        state: reloaded
+        enabled: yes
+        use: rc-service
