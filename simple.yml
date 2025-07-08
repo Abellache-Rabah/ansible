@@ -1,7 +1,7 @@
 ---
 - name: Basic tasks
   # This host is defined in the `first-inventory.ini`
-  hosts: my-localhost
+  hosts: all
   tasks:
     - name: Execute uptime command
       command: uptime
