@@ -1,0 +1,148 @@
+---
+
+### **Introduction**
+
+Utiliser HashiCorp Vault comme une Autorité de Certification (CA) pour SSH offre un moyen sécurisé et centralisé de gérer l'accès aux serveurs. Au lieu de distribuer des clés SSH statiques et à longue durée de vie, les utilisateurs reçoivent des certificats à courte durée de vie après s'être authentifiés auprès de Vault. Cela améliore la sécurité en garantissant que l'accès est automatiquement révoqué après une période de temps configurée (TTL).
+
+### **Partie 1 : Configuration**
+
+Cette section couvre la configuration initiale requise sur le serveur Vault et sur les serveurs cibles auxquels vous accéderez via SSH.
+
+#### **1.1. Configuration du Serveur Vault**
+
+Ces étapes configurent Vault pour agir en tant qu'Autorité de Certification SSH.
+
+1.  **Définir l'adresse de Vault :**
+    Assurez-vous d'abord que votre environnement est configuré pour communiquer avec votre instance Vault.
+    ```bash
+    export VAULT_ADDR="https://vault.univ-evry.fr/"
+    ```
+
+2.  **Se connecter à Vault :**
+    Vous devez être authentifié auprès de Vault pour effectuer des actions administratives.
+    ```bash
+    vault login
+    ```
+
+3.  **Activer le moteur de secrets SSH :**
+    Cette commande monte le moteur de secrets SSH sur un chemin que vous définissez. Toute la configuration se fera sous ce chemin.
+    ```bash
+    vault secrets enable -path={{nom_du_moteur_ssh}} ssh
+    # Exemple :
+    vault secrets enable -path=ssh-client-signer-prod ssh
+    ```
+
+4.  **Générer une Autorité de Certification (CA) :**
+    Ceci crée une nouvelle paire de clés (publique/privée) dans Vault. Vault utilisera cette autorité pour signer les clés SSH des utilisateurs.
+    ```bash
+    vault write {{nom_du_moteur_ssh}}/config/ca generate_signing_key=true
+    # Exemple :
+    vault write ssh-client-signer-prod/config/ca generate_signing_key=true
+    ```
+    Vault affichera la clé publique en sortie.
+
+5.  **Créer un Rôle :**
+    Un rôle définit les paramètres pour la délivrance des certificats. Vous pouvez créer plusieurs rôles pour différentes équipes ou niveaux d'accès.
+    ```bash
+    vault write {{nom_du_moteur_ssh}}/roles/{{nom_du_role}} -<<"EOH"
+    { ... }
+    EOH
+
+    # Exemple :
+    vault write ssh-client-signer-prod/roles/developpeurs -<<"EOH"
+    {
+      "algorithm_signer": "rsa-sha2-256",
+      "allow_user_certificates": true,
+      "allowed_users": "s_tower,testuser",
+      "allowed_extensions": "permit-pty,permit-port-forwarding",
+      "default_extensions": { "permit-pty": "" },
+      "key_type": "ca",
+      "default_user": "s_tower",
+      "ttl": "30m0s"
+    }
+    EOH
+    ```
+    *   `allowed_users`: **C'est un paramètre de sécurité critique.** Il spécifie une liste d'utilisateurs (séparés par des virgules) pour lesquels un client est autorisé à demander un certificat. Dans cet exemple, les utilisateurs ne peuvent demander des certificats que pour se connecter en tant que `s_tower` ou `testuser`. Cela les empêche d'accéder au compte `root` ou à d'autres utilisateurs système.
+    *   `ttl`: La durée de validité du certificat (par exemple, 30 minutes).
+
+#### **1.2. Configuration du Serveur Cible**
+
+Ces étapes doivent être effectuées sur chaque serveur auquel vous souhaitez accéder en utilisant des clés signées par Vault.
+
+1.  **Télécharger la Clé Publique de la CA de Vault :**
+    Récupérez la clé publique de Vault et enregistrez-la sur le serveur. Cette clé est utilisée pour vérifier que les certificats des utilisateurs sont signés par une autorité de confiance.
+    ```bash
+    curl -o /etc/ssh/ca-key.pem {{url_de_vault}}/v1/{{nom_du_moteur_ssh}}/public_key
+    # Exemple :
+    curl -o /etc/ssh/ca-key.pem https://vault.univ-evry.fr/v1/ssh-client-signer-prod/public_key
+    ```
+
+2.  **Configurer le démon SSH (`sshd`) :**
+    Modifiez le fichier de configuration du serveur SSH (`/etc/ssh/sshd_config`) et ajoutez la ligne suivante pour faire confiance à votre CA Vault.
+    ```
+    # /etc/ssh/sshd_config
+    TrustedUserCAKeys /etc/ssh/ca-key.pem
+    ```
+
+3.  **Redémarrer le service SSH :**
+    Appliquez la nouvelle configuration en redémarrant le service `sshd`.
+    ```bash
+    sudo systemctl restart sshd
+    sudo service ssh restart
+    ```
+
+### **Partie 2 : Utilisation**
+
+Cette section explique comment un client peut obtenir un certificat signé de Vault et l'utiliser pour se connecter à un serveur cible.
+
+1.  **Signer votre clé publique :**
+    L'utilisateur prend sa propre clé SSH publique (ex: `~/.ssh/id_rsa.pub`) et demande à Vault de la signer en utilisant un rôle spécifique. La sortie est un certificat signé.
+    ```bash
+    vault write -field=signed_key {{nom_du_moteur_ssh}}/sign/{{nom_du_role}} \
+    public_key=@$HOME/.ssh/id_rsa.pub valid_principals={{nom_utilisateur_distant}} > $HOME/.ssh/id_rsa-cert.pub
+
+    # Exemple :
+    vault write -field=signed_key ssh-client-signer-prod/sign/developpeurs \
+    public_key=@$HOME/.ssh/id_rsa.pub valid_principals=s_tower > $HOME/.ssh/id_rsa-cert.pub
+    ```
+    *   `{{nom_du_moteur_ssh}}/sign/{{nom_du_role}}`: Le point d'accès pour signer une clé, correspondant au rôle que vous avez configuré.
+    *   `valid_principals`: Le nom d'utilisateur avec lequel vous souhaitez vous connecter sur le serveur distant. Ce nom **doit** faire partie des utilisateurs listés dans le champ `allowed_users` du rôle.
+    *   `> $HOME/.ssh/id_rsa-cert.pub`: Le certificat signé est sauvegardé. Utiliser le suffixe `-cert.pub` à côté de votre clé privée permet au client `ssh` de le trouver et de l'utiliser automatiquement.
+
+2.  **(Optionnel) Vérifier le certificat :**
+    Vous pouvez inspecter le certificat pour voir ses détails, tels que sa période de validité et les "principals" (noms d'utilisateur) pour lesquels il est valide.
+    ```bash
+    ssh-keygen -Lf ~/.ssh/id_rsa-cert.pub
+    ```
+
+3.  **Se connecter au serveur :**
+    Vous pouvez maintenant vous connecter en SSH au serveur cible. Le client `ssh` présentera automatiquement votre certificat signé.
+    ```bash
+    # ssh {{nom_utilisateur_distant}}@{{ip_du_serveur}}
+    # Exemple :
+    ssh s_tower@192.168.122.175
+    ```
+    Si vous n'avez pas sauvegardé le certificat à son emplacement par défaut (`~/.ssh/id_rsa-cert.pub`), vous devez spécifier son chemin avec l'option `-i`.
+
+### **Partie 3 : Dépannage**
+
+Si vous rencontrez des problèmes, voici quelques points courants à vérifier :
+
+*   **Connexion refusée / Permission refusée :**
+    Utilisez l'option verbose (`-v`) avec SSH pour obtenir des informations de débogage détaillées. Pour plus de détails, utilisez `-vv` ou `-vvv`.
+    ```bash
+    ssh -v s_tower@192.168.122.175
+    ```
+    Cherchez les lignes mentionnant que le certificat est offert et s'il est accepté ou rejeté par le serveur.
+
+*   **Erreurs Vault :**
+    *   Vérifiez que la variable d'environnement `VAULT_ADDR` est correctement définie.
+    *   Assurez-vous que votre token Vault n'a pas expiré en relançant `vault login`.
+    *   Si vous obtenez une erreur de permission de la part de Vault lors de la signature, assurez-vous que votre politique Vault vous accorde les permissions sur le chemin `{{nom_du_moteur_ssh}}/sign/{{nom_du_role}}`.
+
+*   **Problèmes côté serveur :**
+    *   Confirmez que le service `sshd` a bien été redémarré après la modification de sa configuration.
+    *   Consultez les journaux SSH du serveur (souvent situés dans `/var/log/auth.log` ou `/var/log/secure`) pour trouver des erreurs. Cherchez des messages concernant `TrustedUserCAKeys`.
+
+*   **Certificat expiré :**
+    Les certificats sont temporaires. Si vous ne pouvez plus vous connecter, il est probable qu'il ait expiré. Répétez simplement l'étape 1 de la section "Utilisation" pour en obtenir un nouveau.
